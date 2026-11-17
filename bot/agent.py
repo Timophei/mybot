@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from anthropic import AsyncAnthropic
 
 from .bitrix import BitrixError
 from .invoices import Draft, InvoiceService
@@ -114,11 +113,18 @@ class AgentReply:
 
 
 class Agent:
-    def __init__(self, api_key: str, model: str, invoices: InvoiceService, tz: str):
-        self.client = AsyncAnthropic(api_key=api_key)
-        self.model = model
+    def __init__(self, cfg, invoices: InvoiceService):
+        self.provider = cfg.llm_provider
+        if self.provider == "openai":
+            from openai import AsyncOpenAI
+            self.client = AsyncOpenAI(api_key=cfg.openai_api_key, base_url=cfg.openai_base_url or None)
+            self.model = cfg.openai_model
+        else:
+            from anthropic import AsyncAnthropic
+            self.client = AsyncAnthropic(api_key=cfg.anthropic_api_key)
+            self.model = cfg.anthropic_model
         self.inv = invoices
-        self.tz = tz
+        self.tz = cfg.timezone
         self.history: dict[int, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=HISTORY_LEN))
 
     def reset(self, chat_id: int) -> None:
@@ -130,53 +136,92 @@ class Agent:
                              year=now.year, tz=self.tz, employee=f"{emp.name} (id {emp.id})")
 
     async def _run_tool(self, name: str, args: dict[str, Any], emp: Employee,
-                        state: dict[str, Any]) -> Any:
-        if name == "search_companies":
-            return await self.inv.search_companies(args["query"])
-        if name == "list_invoices":
-            return await self.inv.list_invoices(int(args["company_id"]), args.get("title_contains"),
-                                                int(args.get("limit") or 5))
-        if name == "get_invoice":
-            return await self.inv.get_invoice(int(args["invoice_id"]))
-        if name == "draft_invoice":
-            d = await self.inv.draft_invoice(emp.id, int(args["source_invoice_id"]), args["title"],
-                                             args.get("rows") or [], args.get("comment") or "")
-            state["draft"] = d
-            return {"draft_id": d.id, "total": d.total, "rows": len(d.rows),
-                    "note": "Черновик готов, сотрудник увидит кнопки подтверждения."}
-        raise ValueError(f"Неизвестный инструмент {name}")
+                        state: dict[str, Any]) -> tuple[str, bool]:
+        """Выполнить инструмент. Возвращает (json-строка результата, была ли ошибка)."""
+        try:
+            if name == "search_companies":
+                out: Any = await self.inv.search_companies(args["query"])
+            elif name == "list_invoices":
+                out = await self.inv.list_invoices(int(args["company_id"]), args.get("title_contains"),
+                                                   int(args.get("limit") or 5))
+            elif name == "get_invoice":
+                out = await self.inv.get_invoice(int(args["invoice_id"]))
+            elif name == "draft_invoice":
+                d = await self.inv.draft_invoice(emp.id, int(args["source_invoice_id"]), args["title"],
+                                                 args.get("rows") or [], args.get("comment") or "")
+                state["draft"] = d
+                out = {"draft_id": d.id, "total": d.total, "rows": len(d.rows),
+                       "note": "Черновик готов, сотрудник увидит кнопки подтверждения."}
+            else:
+                raise ValueError(f"Неизвестный инструмент {name}")
+            return json.dumps(out, ensure_ascii=False, default=str), False
+        except (BitrixError, ValueError, KeyError, TypeError) as exc:
+            log.warning("Инструмент %s упал: %s", name, exc)
+            return f"Ошибка: {exc}", True
 
     async def handle(self, chat_id: int, emp: Employee, text: str) -> AgentReply:
         hist = self.history[chat_id]
-        messages: list[dict[str, Any]] = list(hist) + [{"role": "user", "content": text}]
         state: dict[str, Any] = {}
-        final_text = ""
+        if self.provider == "openai":
+            final_text = await self._loop_openai(list(hist), text, emp, state)
+        else:
+            final_text = await self._loop_anthropic(list(hist), text, emp, state)
+        final_text = final_text or ("" if state.get("draft") else
+                                    "Не получилось довести дело до конца — попробуй сформулировать иначе.")
+        # В истории храним только текст, без промежуточных вызовов инструментов
+        hist.append({"role": "user", "content": text})
+        hist.append({"role": "assistant", "content": final_text or "Подготовил черновик счёта."})
+        return AgentReply(text=final_text, draft=state.get("draft"))
 
+    # ---------- OpenAI (Chat Completions + function calling) ----------
+
+    async def _loop_openai(self, hist: list, text: str, emp: Employee, state: dict) -> str:
+        tools = [{"type": "function", "function": {
+            "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+            for t in TOOLS]
+        messages: list[dict[str, Any]] = (
+            [{"role": "system", "content": self._system(emp)}] + hist + [{"role": "user", "content": text}])
+        final_text = ""
+        for _ in range(MAX_STEPS):
+            resp = await self.client.chat.completions.create(
+                model=self.model, messages=messages, tools=tools, max_completion_tokens=4096)
+            msg = resp.choices[0].message
+            final_text = (msg.content or "").strip()
+            calls = msg.tool_calls or []
+            if not calls:
+                break
+            messages.append({"role": "assistant", "content": msg.content or None, "tool_calls": [
+                {"id": c.id, "type": "function",
+                 "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                for c in calls]})
+            for c in calls:
+                try:
+                    args = json.loads(c.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                content, _err = await self._run_tool(c.function.name, args, emp, state)
+                messages.append({"role": "tool", "tool_call_id": c.id, "content": content})
+        return final_text
+
+    # ---------- Anthropic (Messages + tool use) ----------
+
+    async def _loop_anthropic(self, hist: list, text: str, emp: Employee, state: dict) -> str:
+        messages: list[dict[str, Any]] = hist + [{"role": "user", "content": text}]
+        final_text = ""
         for _ in range(MAX_STEPS):
             resp = await self.client.messages.create(
                 model=self.model, max_tokens=2048, system=self._system(emp),
-                tools=TOOLS, messages=messages,
-            )
-            messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in resp.content]})
+                tools=TOOLS, messages=messages)
+            messages.append({"role": "assistant",
+                             "content": [b.model_dump(exclude_none=True) for b in resp.content]})
             final_text = "\n".join(b.text for b in resp.content if b.type == "text").strip()
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if resp.stop_reason != "tool_use" or not tool_uses:
                 break
             results = []
             for tu in tool_uses:
-                try:
-                    out = await self._run_tool(tu.name, dict(tu.input), emp, state)
-                    content, is_error = json.dumps(out, ensure_ascii=False, default=str), False
-                except (BitrixError, ValueError, KeyError) as exc:
-                    log.warning("Инструмент %s упал: %s", tu.name, exc)
-                    content, is_error = f"Ошибка: {exc}", True
+                content, is_error = await self._run_tool(tu.name, dict(tu.input), emp, state)
                 results.append({"type": "tool_result", "tool_use_id": tu.id,
                                 "content": content, "is_error": is_error})
             messages.append({"role": "user", "content": results})
-        else:
-            final_text = final_text or "Не получилось довести дело до конца — попробуй сформулировать иначе."
-
-        # В истории храним только текст, без промежуточных вызовов инструментов
-        hist.append({"role": "user", "content": text})
-        hist.append({"role": "assistant", "content": final_text or "…"})
-        return AgentReply(text=final_text, draft=state.get("draft"))
+        return final_text

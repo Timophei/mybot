@@ -46,11 +46,26 @@ class Settings:
     # Срок оплаты по умолчанию, если у исходного счёта его нет
     invoice_pay_days: int = field(default_factory=lambda: _int("INVOICE_PAY_DAYS", 5))
 
-    # Модель
-    anthropic_api_key: str = field(default_factory=lambda: _req("ANTHROPIC_API_KEY"))
+    # Модель: openai или anthropic. По умолчанию — та, чей ключ задан.
+    llm_provider: str = field(default_factory=lambda: (
+        os.getenv("LLM_PROVIDER", "").strip().lower()
+        or ("openai" if os.getenv("OPENAI_API_KEY", "").strip() else "anthropic")))
+    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip())
+    openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.6-terra"))
+    # Для прокси или совместимого API; пусто = api.openai.com
+    openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "").strip())
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "").strip())
     anthropic_model: str = field(default_factory=lambda: os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5"))
 
     timezone: str = field(default_factory=lambda: os.getenv("TIMEZONE", "Asia/Irkutsk"))
+
+    def __post_init__(self) -> None:
+        if self.llm_provider == "openai" and not self.openai_api_key:
+            raise RuntimeError("LLM_PROVIDER=openai, но не задан OPENAI_API_KEY")
+        if self.llm_provider == "anthropic" and not self.anthropic_api_key:
+            raise RuntimeError("Не задан ни OPENAI_API_KEY, ни ANTHROPIC_API_KEY")
+        if self.llm_provider not in ("openai", "anthropic"):
+            raise RuntimeError("LLM_PROVIDER должен быть openai или anthropic")
 
     @property
     def bitrix_portal_url(self) -> str:

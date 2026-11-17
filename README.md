@@ -6,7 +6,7 @@
 
 Бот:
 1. проверяет, что пишет сотрудник портала: Telegram-логин или ID должен быть в поле профиля `UF_USR_1794934830441` («telega»);
-2. с помощью Claude разбирает просьбу и через вебхук портала находит компанию, её прошлый счёт и строки в нём;
+2. с помощью языковой модели (OpenAI или Claude) разбирает просьбу и через вебхук портала находит компанию, её прошлый счёт и строки в нём;
 3. показывает черновик нового счёта с кнопками **Создать / Отмена**;
 4. после подтверждения создаёт смарт-счёт: компания, контакт, наши реквизиты, реквизиты клиента и сделка берутся из образца, дата — сегодня, срок оплаты такой же, как у образца;
 5. формирует печатную форму по шаблону Битрикса и присылает её в чат: PDF, а если портал не умеет конвертировать — DOCX.
@@ -16,14 +16,14 @@
 ```
 Telegram ──HTTPS──► nginx (b-integration.ru/mybot/) ──► 127.0.0.1:8085 (aiohttp + aiogram)
                                                          │
-                                         Claude API ◄────┤────► bitrix.b-integration.ru/rest/<вебхук>
+                                         OpenAI API ◄────┤────► bitrix.b-integration.ru/rest/<вебхук>
 ```
 
 | Файл | Что делает |
 |---|---|
 | `bot/main.py` | вебхук Telegram, команды, кнопки подтверждения |
 | `bot/staff.py` | проверка сотрудника по полю профиля (кеш на 10 мин) |
-| `bot/agent.py` | цикл Claude с инструментами: `search_companies`, `list_invoices`, `get_invoice`, `draft_invoice` |
+| `bot/agent.py` | цикл модели (OpenAI / Claude) с инструментами: `search_companies`, `list_invoices`, `get_invoice`, `draft_invoice` |
 | `bot/invoices.py` | черновик → `crm.item.add` + `crm.item.productrow.set` + перенос реквизитов → `crm.documentgenerator.document.add` |
 | `bot/bitrix.py` | REST-клиент через входящий вебхук |
 
@@ -37,7 +37,7 @@ Telegram ──HTTPS──► nginx (b-integration.ru/mybot/) ──► 127.0.0.
 - **Входящий вебхук Битрикса** — на портале: *Приложения → Разработчикам → Другое → Входящий вебхук*.
   Права: **CRM (crm)**, **Пользователи (user)**, **Генератор документов (documentgenerator)**.
   Вебхук создавайте от пользователя, у которого есть права на счета и компании.
-- **Ключ Claude API** — в [console.anthropic.com](https://console.anthropic.com), раздел *API Keys*.
+- **Ключ OpenAI API** — в [platform.openai.com](https://platform.openai.com/api-keys). (Можно и Claude: `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`.)
 
 ### 2. Код и окружение
 
@@ -64,7 +64,8 @@ sudo nano .env
 | `TELEGRAM_BOT_TOKEN` | токен от BotFather |
 | `WEBHOOK_SECRET` | результат `openssl rand -hex 32` |
 | `BITRIX_WEBHOOK_URL` | `https://bitrix.b-integration.ru/rest/<id>/<код>/` |
-| `ANTHROPIC_API_KEY` | ключ Claude API |
+| `OPENAI_API_KEY` | ключ OpenAI |
+| `OPENAI_MODEL` | модель, которую используешь (по умолчанию `gpt-5.6-terra`) |
 
 Остальное оставить по умолчанию. Затем закрыть файл от чужих глаз:
 

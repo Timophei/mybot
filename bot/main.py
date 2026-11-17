@@ -26,7 +26,7 @@ bx = Bitrix(settings.bitrix_webhook)
 staff = StaffDirectory(bx, settings.telegram_user_field)
 invoices = InvoiceService(bx, settings.invoice_entity_type_id, settings.invoice_template_id,
                           settings.invoice_pay_days, settings.timezone)
-agent = Agent(settings.anthropic_api_key, settings.anthropic_model, invoices, settings.timezone)
+agent = Agent(settings, invoices)
 router = Router()
 
 DENIED = ("Бот только для сотрудников. Попросите администратора вписать ваш Telegram "
