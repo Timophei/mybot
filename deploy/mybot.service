@@ -1,0 +1,21 @@
+[Unit]
+Description=mybot — Telegram-бот для портала Битрикс24
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mybot
+Group=mybot
+WorkingDirectory=/opt/mybot
+ExecStart=/opt/mybot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/mybot
+
+[Install]
+WantedBy=multi-user.target
