@@ -59,6 +59,9 @@ class Settings:
     # (в chat у GPT-5.x функции работают только с none)
     openai_reasoning_effort: str = field(
         default_factory=lambda: os.getenv("OPENAI_REASONING_EFFORT", "").strip())
+    # Модель распознавания голосовых
+    openai_transcribe_model: str = field(
+        default_factory=lambda: os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-transcribe").strip())
     # Для прокси или совместимого API; пусто = api.openai.com
     openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "").strip())
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "").strip())

@@ -18,6 +18,7 @@ from .bitrix import Bitrix, BitrixError
 from .config import settings
 from .invoices import Draft, InvoiceService
 from .staff import Employee, StaffDirectory
+from .voice import Transcriber
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("mybot")
@@ -27,6 +28,7 @@ staff = StaffDirectory(bx, settings.telegram_user_field)
 invoices = InvoiceService(bx, settings.invoice_entity_type_id, settings.invoice_template_id,
                           settings.invoice_pay_days, settings.timezone)
 agent = Agent(settings, invoices)
+transcriber = Transcriber(settings)
 router = Router()
 
 DENIED = ("Бот только для сотрудников. Попросите администратора вписать ваш Telegram "
@@ -121,15 +123,10 @@ async def on_print(msg: Message, bot: Bot) -> None:
     await send_print_form(msg, bot, int(arg[0]), f"Счёт №{arg[0]}")
 
 
-@router.message(F.text)
-async def on_text(msg: Message, bot: Bot) -> None:
-    emp = await who(msg.from_user)
-    if not emp:
-        await msg.answer(DENIED.format(ident=ident(msg.from_user)))
-        return
+async def process_text(msg: Message, bot: Bot, emp: Employee, text: str) -> None:
     await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
     try:
-        reply = await agent.handle(msg.chat.id, emp, msg.text)
+        reply = await agent.handle(msg.chat.id, emp, text)
     except Exception:  # noqa: BLE001
         log.exception("Ошибка обработки сообщения")
         await msg.answer("Что-то сломалось при обработке, подробности в логе сервера.")
@@ -137,8 +134,44 @@ async def on_text(msg: Message, bot: Bot) -> None:
     if reply.text:
         await msg.answer(html.escape(reply.text))
     if reply.draft:
-        text, kb = await draft_card(reply.draft)
-        await msg.answer(text, reply_markup=kb)
+        card, kb = await draft_card(reply.draft)
+        await msg.answer(card, reply_markup=kb)
+
+
+@router.message(F.text)
+async def on_text(msg: Message, bot: Bot) -> None:
+    emp = await who(msg.from_user)
+    if not emp:
+        await msg.answer(DENIED.format(ident=ident(msg.from_user)))
+        return
+    await process_text(msg, bot, emp, msg.text)
+
+
+@router.message(F.voice | F.audio | F.video_note)
+async def on_voice(msg: Message, bot: Bot) -> None:
+    emp = await who(msg.from_user)
+    if not emp:
+        await msg.answer(DENIED.format(ident=ident(msg.from_user)))
+        return
+    if not transcriber.enabled:
+        await msg.answer("Голосовые не настроены: для распознавания нужен OPENAI_API_KEY.")
+        return
+    media = msg.voice or msg.audio or msg.video_note
+    await bot.send_chat_action(msg.chat.id, ChatAction.TYPING)
+    try:
+        buf = await bot.download(media)
+        name = "voice.ogg" if msg.voice else ("video.mp4" if msg.video_note else
+                                             (getattr(media, "file_name", None) or "audio.mp3"))
+        text = await transcriber.transcribe(buf.read(), name)
+    except Exception:  # noqa: BLE001
+        log.exception("Распознавание голоса")
+        await msg.answer("Не смог распознать голосовое, попробуй ещё раз или напиши текстом.")
+        return
+    if not text:
+        await msg.answer("Ничего не расслышал 🤷")
+        return
+    await msg.answer(f"🎤 <i>{html.escape(text)}</i>")
+    await process_text(msg, bot, emp, text)
 
 
 @router.callback_query(F.data.startswith("inv:"))
