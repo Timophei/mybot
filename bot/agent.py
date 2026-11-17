@@ -119,6 +119,7 @@ class Agent:
             from openai import AsyncOpenAI
             self.client = AsyncOpenAI(api_key=cfg.openai_api_key, base_url=cfg.openai_base_url or None)
             self.model = cfg.openai_model
+            self.reasoning_effort = cfg.openai_reasoning_effort
         else:
             from anthropic import AsyncAnthropic
             self.client = AsyncAnthropic(api_key=cfg.anthropic_api_key)
@@ -183,8 +184,21 @@ class Agent:
             [{"role": "system", "content": self._system(emp)}] + hist + [{"role": "user", "content": text}])
         final_text = ""
         for _ in range(MAX_STEPS):
-            resp = await self.client.chat.completions.create(
-                model=self.model, messages=messages, tools=tools, max_completion_tokens=4096)
+            kwargs: dict[str, Any] = dict(model=self.model, messages=messages, tools=tools,
+                                          max_completion_tokens=4096)
+            if self.reasoning_effort:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+            try:
+                resp = await self.client.chat.completions.create(**kwargs)
+            except Exception as exc:  # noqa: BLE001
+                # Модели без «размышлений» не знают этот параметр — повторяем без него
+                if self.reasoning_effort and "reasoning_effort" in str(exc) and "not supported" not in str(exc):
+                    log.info("Модель не принимает reasoning_effort, отключаю: %s", exc)
+                    self.reasoning_effort = ""
+                    kwargs.pop("reasoning_effort")
+                    resp = await self.client.chat.completions.create(**kwargs)
+                else:
+                    raise
             msg = resp.choices[0].message
             final_text = (msg.content or "").strip()
             calls = msg.tool_calls or []
