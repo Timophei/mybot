@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from .bitrix import Bitrix, BitrixError
@@ -125,14 +126,26 @@ class InvoiceService:
         items = res.get("items", [])[: max(1, min(limit, 30))]
         rows_by_id: dict[int, list] = {}
         if items:
-            cmd = {f"r{i['id']}": (f"crm.item.productrow.list?filter[=ownerType]={self.owner_type}"
-                                   f"&filter[=ownerId]={i['id']}") for i in items}
+            cmd = {f"r{i['id']}": "crm.item.productrow.list?" + urlencode(
+                {"filter[=ownerType]": self.owner_type, "filter[=ownerId]": i["id"]}) for i in items}
             try:
-                batch = await self.bx.call("batch", {"halt": 0, "cmd": cmd})
-                for key, val in (batch or {}).get("result", {}).items():
-                    rows_by_id[int(key[1:])] = (val or {}).get("productRows", [])
+                batch = await self.bx.call("batch", {"halt": 0, "cmd": cmd}) or {}
+                results = batch.get("result") if isinstance(batch, dict) else None
+                if isinstance(results, dict):
+                    for key, val in results.items():
+                        if isinstance(val, dict):
+                            rows_by_id[int(key[1:])] = val.get("productRows", [])
+                errors = batch.get("result_error") if isinstance(batch, dict) else None
+                if errors:
+                    log.info("batch: ошибки по строкам: %s", str(errors)[:300])
             except BitrixError as exc:
                 log.info("batch строк не прошёл: %s", exc)
+            # чего не получили пакетом — добираем по одному
+            missing = [i["id"] for i in items if i["id"] not in rows_by_id]
+            if missing:
+                got = await asyncio.gather(*(self._rows(m) for m in missing), return_exceptions=True)
+                for m, r in zip(missing, got):
+                    rows_by_id[m] = r if isinstance(r, list) else []
         return [{
             "id": i["id"], "title": i.get("title"), "sum": i.get("opportunity"),
             "currency": i.get("currencyId"), "date": (i.get("begindate") or "")[:10],

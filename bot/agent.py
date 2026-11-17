@@ -168,8 +168,8 @@ class Agent:
             else:
                 raise ValueError(f"Неизвестный инструмент {name}")
             return json.dumps(out, ensure_ascii=False, default=str), False
-        except (BitrixError, ValueError, KeyError, TypeError) as exc:
-            log.warning("Инструмент %s упал: %s", name, exc)
+        except Exception as exc:  # noqa: BLE001 — ошибку отдаём модели, а не роняем разговор
+            log.warning("Инструмент %s упал: %s", name, exc, exc_info=not isinstance(exc, BitrixError))
             return f"Ошибка: {exc}", True
 
     async def handle(self, chat_id: int, emp: Employee, text: str) -> AgentReply:
