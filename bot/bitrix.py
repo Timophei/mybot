@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -65,23 +65,26 @@ class Bitrix:
     async def download(self, machine_url: str) -> bytes:
         """Скачать файл по *UrlMachine из documentgenerator.
 
-        Такие ссылки указывают на REST-метод (…/rest/<method>?token=…).
-        Вызываем этот метод через наш вебхук, чтобы пройти авторизацию.
+        По документации Битрикса такую ссылку берут как есть: в ней уже есть auth/token.
+        Относительную ссылку дополняем адресом портала. Если не вышло — пробуем тот же
+        метод через путь нашего вебхука.
         """
         http = await self._http()
-        parts = urlsplit(machine_url)
+        hook = urlsplit(self.webhook)
+        portal = f"{hook.scheme}://{hook.netloc}"
+        url = machine_url if machine_url.startswith("http") else portal + machine_url
+        attempts = [url]
+        parts = urlsplit(url)
         if "/rest/" in parts.path:
             method = parts.path.rsplit("/", 1)[-1]
-            if method.endswith(".json"):
-                method = method[:-5]
-            url = f"{self.webhook}{method}"
-            params = dict(parse_qsl(parts.query))
-        else:
-            url, params = machine_url, {}
-        async with http.get(url, params=params) as resp:
-            body = await resp.read()
-            if resp.status != 200:
-                raise BitrixError(f"Не удалось скачать файл: HTTP {resp.status}")
-            if resp.content_type == "application/json" and body.lstrip().startswith(b"{"):
-                raise BitrixError(f"Вместо файла пришла ошибка: {body[:300]!r}")
-            return body
+            attempts.append(f"{self.webhook}{method}?{parts.query}")
+        last = ""
+        for u in attempts:
+            async with http.get(u, headers={"Referer": portal + "/"}) as resp:
+                body = await resp.read()
+                ctype = resp.content_type or ""
+                if resp.status == 200 and "json" not in ctype and "html" not in ctype:
+                    return body
+                last = f"HTTP {resp.status}, {ctype}, {body[:200]!r}"
+                log.warning("Скачивание файла не удалось (%s), пробую следующий способ", last)
+        raise BitrixError(f"Не удалось скачать файл: {last}")

@@ -214,11 +214,11 @@ class InvoiceService:
             return
         if not link:
             return
-        params = {
-            "entityTypeId": self.etid, "entityId": new_id,
-            "requisiteId": link.get("REQUISITE_ID", 0), "bankDetailId": link.get("BANK_DETAIL_ID", 0),
-            "mcRequisiteId": link.get("MC_REQUISITE_ID", 0), "mcBankDetailId": link.get("MC_BANK_DETAIL_ID", 0),
-        }
+        params = {"fields": {
+            "ENTITY_TYPE_ID": self.etid, "ENTITY_ID": new_id,
+            "REQUISITE_ID": link.get("REQUISITE_ID", 0), "BANK_DETAIL_ID": link.get("BANK_DETAIL_ID", 0),
+            "MC_REQUISITE_ID": link.get("MC_REQUISITE_ID", 0), "MC_BANK_DETAIL_ID": link.get("MC_BANK_DETAIL_ID", 0),
+        }}
         try:
             await self.bx.call("crm.requisite.link.register", params)
         except BitrixError as exc:
@@ -253,7 +253,11 @@ class InvoiceService:
         doc = res["document"]
         for _ in range(15):
             if doc.get("pdfUrlMachine"):
-                return await self.bx.download(doc["pdfUrlMachine"]), "pdf"
+                try:
+                    return await self.bx.download(doc["pdfUrlMachine"]), "pdf"
+                except BitrixError as exc:
+                    log.warning("PDF не скачался, беру Word: %s", exc)
+                    break
             await asyncio.sleep(2)
             doc = (await self.bx.call("crm.documentgenerator.document.get", {"id": doc["id"]}))["document"]
         url = doc.get("downloadUrlMachine")

@@ -82,13 +82,41 @@ async def on_start(msg: Message) -> None:
         return
     await msg.answer(f"Привет, {html.escape(emp.name)}! Пиши задачу обычным текстом, например:\n"
                      "<i>выстави счёт Русирке как в прошлый раз за поддержку, только месяц поменяй</i>\n\n"
-                     "/new — начать разговор заново")
+                     "/new — начать разговор заново\n/print 365 — печатная форма счёта по номеру")
 
 
 @router.message(Command("new"))
 async def on_new(msg: Message) -> None:
     agent.reset(msg.chat.id)
     await msg.answer("Ок, начинаем с чистого листа.")
+
+
+async def send_print_form(message: Message, bot: Bot, invoice_id: int, caption: str) -> None:
+    await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_DOCUMENT)
+    try:
+        content, ext = await invoices.print_form(invoice_id)
+    except BitrixError as exc:
+        log.exception("Печатная форма")
+        await message.answer(f"Печатная форма не собралась: {html.escape(str(exc))}")
+        return
+    note = "" if ext == "pdf" else "\n(PDF портал не отдал — прислал Word)"
+    await message.answer_document(
+        BufferedInputFile(content, filename=f"Счёт {invoice_id}.{ext}"),
+        caption=f"{html.escape(caption)}{note}",
+    )
+
+
+@router.message(Command("print"))
+async def on_print(msg: Message, bot: Bot) -> None:
+    emp = await who(msg.from_user)
+    if not emp:
+        await msg.answer(DENIED.format(ident=ident(msg.from_user)))
+        return
+    arg = (msg.text or "").split(maxsplit=1)[1:]
+    if not arg or not arg[0].strip().isdigit():
+        await msg.answer("Укажи номер счёта: <code>/print 365</code>")
+        return
+    await send_print_form(msg, bot, int(arg[0]), f"Счёт №{arg[0]}")
 
 
 @router.message(F.text)
@@ -136,18 +164,7 @@ async def on_invoice_button(cb: CallbackQuery, bot: Bot) -> None:
 
     link = f"{settings.bitrix_portal_url}/crm/type/{settings.invoice_entity_type_id}/details/{new_id}/"
     await cb.message.answer(f"Счёт №{new_id} создан: {link}\nФормирую печатную форму…")
-    await bot.send_chat_action(cb.message.chat.id, ChatAction.UPLOAD_DOCUMENT)
-    try:
-        content, ext = await invoices.print_form(new_id)
-    except BitrixError as exc:
-        log.exception("Печатная форма")
-        await cb.message.answer(f"Счёт есть, а печатная форма не собралась: {html.escape(str(exc))}")
-        return
-    note = "" if ext == "pdf" else "\n(PDF портал не отдал — прислал Word)"
-    await cb.message.answer_document(
-        BufferedInputFile(content, filename=f"Счёт {new_id}.{ext}"),
-        caption=f"{html.escape(d.title)}{note}",
-    )
+    await send_print_form(cb.message, bot, new_id, d.title)
 
 
 async def on_startup(bot: Bot) -> None:
