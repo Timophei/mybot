@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -26,6 +28,16 @@ ROW_COPY_FIELDS = (
 def owner_type_for(entity_type_id: int) -> str:
     """Короткий код владельца товарных строк для crm.item.productrow.*"""
     return {31: "SI", 2: "D", 1: "L", 7: "Q"}.get(entity_type_id, f"T{entity_type_id:x}")
+
+
+_LEGAL = re.compile(r"\b(ооо|оао|зао|пао|ао|ип|нко|ано|llc|ltd)\b")
+
+
+def _norm(text: str) -> str:
+    t = (text or "").lower().replace("ё", "е")
+    t = re.sub(r"[«»\"'“”„.,()\-–—]", " ", t)
+    t = _LEGAL.sub(" ", t)
+    return " ".join(t.split())
 
 
 def _d(value: Any) -> date | None:
@@ -63,37 +75,70 @@ class InvoiceService:
         self.pay_days = pay_days
         self.drafts: dict[str, Draft] = {}
         self._companies: dict[int, str] = {}
+        self._company_list: list[tuple[int, str]] | None = None
+        self._company_list_at = 0.0
 
     # ---------- инструменты для модели ----------
 
-    async def search_companies(self, query: str) -> list[dict[str, Any]]:
-        res = await self.bx.call("crm.company.list", {
-            "filter": {"%TITLE": query},
-            "select": ["ID", "TITLE"],
-            "order": {"DATE_MODIFY": "DESC"},
-        }) or []
-        out = [{"id": int(c["ID"]), "title": c["TITLE"]} for c in res[:15]]
-        for c in out:
-            self._companies[c["id"]] = c["title"]
-        return out
+    async def _all_companies(self) -> list[tuple[int, str]]:
+        """Все компании (id, название), кеш на 10 минут — для нечёткого поиска."""
+        if self._company_list is None or time.monotonic() - self._company_list_at > 600:
+            rows = await self.bx.list_all("crm.company.list", {"select": ["ID", "TITLE"],
+                                                               "order": {"ID": "DESC"}}, limit=20000)
+            self._company_list = [(int(c["ID"]), c.get("TITLE") or "") for c in rows]
+            self._company_list_at = time.monotonic()
+            for cid, title in self._company_list:
+                self._companies[cid] = title
+        return self._company_list
 
-    async def list_invoices(self, company_id: int, title_contains: str | None = None,
-                            limit: int = 5) -> list[dict[str, Any]]:
-        flt: dict[str, Any] = {"=companyId": company_id}
-        if title_contains:
-            flt["%title"] = title_contains
+    async def search_companies(self, query: str) -> list[dict[str, Any]]:
+        """Нечёткий поиск: опечатки, падежи, переставленные буквы («асит туру» → «Аист Тур»)."""
+        companies = await self._all_companies()
+        q = _norm(query)
+        q_words = [w for w in q.split() if len(w) > 1]
+        scored = []
+        for cid, title in companies:
+            t = _norm(title)
+            if not t:
+                continue
+            score = SequenceMatcher(None, q, t).ratio()
+            if q and q in t:
+                score = max(score, 0.9)
+            if q_words:
+                t_words = t.split()
+                word_scores = [max((SequenceMatcher(None, w, tw).ratio() for tw in t_words), default=0)
+                               for w in q_words]
+                score = max(score, sum(word_scores) / len(word_scores))
+            scored.append((score, cid, title))
+        scored.sort(reverse=True)
+        return [{"id": cid, "title": title, "match": round(sc, 2)}
+                for sc, cid, title in scored[:8] if sc >= 0.5]
+
+    async def list_invoices(self, company_id: int, limit: int = 15) -> list[dict[str, Any]]:
+        """Последние счета компании вместе с названиями строк (одним batch-запросом)."""
         res = await self.bx.call("crm.item.list", {
             "entityTypeId": self.etid,
-            "filter": flt,
+            "filter": {"=companyId": company_id},
             "order": {"id": "DESC"},
-            "select": ["id", "title", "opportunity", "currencyId", "begindate", "closedate",
-                       "stageId", "createdTime"],
+            "select": ["id", "title", "opportunity", "currencyId", "begindate", "stageId"],
         }) or {}
-        items = res.get("items", [])[: max(1, min(limit, 20))]
+        items = res.get("items", [])[: max(1, min(limit, 30))]
+        rows_by_id: dict[int, list] = {}
+        if items:
+            cmd = {f"r{i['id']}": (f"crm.item.productrow.list?filter[=ownerType]={self.owner_type}"
+                                   f"&filter[=ownerId]={i['id']}") for i in items}
+            try:
+                batch = await self.bx.call("batch", {"halt": 0, "cmd": cmd})
+                for key, val in (batch or {}).get("result", {}).items():
+                    rows_by_id[int(key[1:])] = (val or {}).get("productRows", [])
+            except BitrixError as exc:
+                log.info("batch строк не прошёл: %s", exc)
         return [{
             "id": i["id"], "title": i.get("title"), "sum": i.get("opportunity"),
-            "currency": i.get("currencyId"), "date": i.get("begindate"),
-            "pay_until": i.get("closedate"), "stage": i.get("stageId"),
+            "currency": i.get("currencyId"), "date": (i.get("begindate") or "")[:10],
+            "stage": i.get("stageId"),
+            "rows": [f"{r.get('productName')} — {r.get('quantity')} × {r.get('price')}"
+                     for r in rows_by_id.get(i["id"], [])],
         } for i in items]
 
     async def _rows(self, invoice_id: int) -> list[dict[str, Any]]:

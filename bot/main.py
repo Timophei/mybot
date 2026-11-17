@@ -66,7 +66,9 @@ async def draft_card(d: Draft) -> tuple[str, InlineKeyboardMarkup]:
         lines.append(f"{n}. {html.escape(str(r.get('productName')))} — {qty_s} × "
                      f"{fmt_money(float(r.get('price') or 0), cur)}")
     lines += ["", f"<b>Итого: {fmt_money(d.total, cur)}</b>",
-              f"По образцу счёта №{d.source.get('id')}"]
+              f"По образцу счёта №{d.source.get('id')} «{html.escape(str(d.source.get('title') or ''))}» "
+              f"от {'.'.join(reversed(str(d.source.get('begindate') or '')[:10].split('-')))}, "
+              f"{fmt_money(float(d.source.get('opportunity') or 0), cur)}"]
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Создать", callback_data=f"inv:ok:{d.id}"),
         InlineKeyboardButton(text="✖️ Отмена", callback_data=f"inv:no:{d.id}"),

@@ -52,9 +52,13 @@ class Settings:
         or ("openai" if os.getenv("OPENAI_API_KEY", "").strip() else "anthropic")))
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", "").strip())
     openai_model: str = field(default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-5.6-terra"))
-    # Для GPT-5.x в Chat Completions инструменты работают только с reasoning_effort=none
+    # responses (рекомендуется: модель «думает» и вызывает функции) или chat (Chat Completions)
+    openai_api_mode: str = field(
+        default_factory=lambda: os.getenv("OPENAI_API_MODE", "responses").strip().lower() or "responses")
+    # none/low/medium/high; пусто = low для responses, none для chat
+    # (в chat у GPT-5.x функции работают только с none)
     openai_reasoning_effort: str = field(
-        default_factory=lambda: os.getenv("OPENAI_REASONING_EFFORT", "none").strip())
+        default_factory=lambda: os.getenv("OPENAI_REASONING_EFFORT", "").strip())
     # Для прокси или совместимого API; пусто = api.openai.com
     openai_base_url: str = field(default_factory=lambda: os.getenv("OPENAI_BASE_URL", "").strip())
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "").strip())
