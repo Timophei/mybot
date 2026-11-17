@@ -42,7 +42,7 @@ class StaffDirectory:
         self.bx = bx
         self.field = field
         self._index: dict[str, Employee] = {}
-        self._loaded_at = 0.0
+        self._loaded_at: float | None = None
 
     async def _reload(self) -> None:
         users = await self.bx.list_all("user.get", {"FILTER": {"ACTIVE": True}})
@@ -58,7 +58,7 @@ class StaffDirectory:
 
     async def find(self, tg_user_id: int, tg_username: str | None) -> Employee | None:
         keys = [str(tg_user_id)] + ([tg_username.lower()] if tg_username else [])
-        if time.monotonic() - self._loaded_at > CACHE_TTL:
+        if self._loaded_at is None or time.monotonic() - self._loaded_at > CACHE_TTL:
             await self._reload()
         for k in keys:
             if k in self._index:
